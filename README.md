@@ -9,11 +9,13 @@ Send a custom first message to the right people on LinkedIn, from one terminal U
 Requires Go 1.25+.
 
 ```bash
-go install github.com/codeyevsky/liout/cmd/liout@latest
-liout
+git clone https://github.com/codeyevsky/liout.git
+cd liout
+go build -o liout ./cmd/liout
+./liout
 ```
 
-First run creates the config and drops you at sign in; it downloads the Playwright browser once if needed.
+Everything lives in this one folder: the `liout` binary plus its data (`config.json`, `messages/`, `data/`, `session.json`) are created here on first run. First run also downloads the Playwright browser once if needed.
 
 ## Use
 
