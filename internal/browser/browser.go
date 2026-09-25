@@ -146,7 +146,7 @@ func Open(o Opts) (*Session, error) {
 	dir := profileDir(o.Browser)
 	ctx, err := engine.LaunchPersistentContext(dir, opts)
 	if err != nil && regexp.MustCompile(`(?i)SingletonLock|ProcessSingleton|in use|already running|Failed to (create|launch)`).MatchString(err.Error()) {
-		// stale lock from a previous run that didn't exit cleanly — clear it and retry once
+		// stale lock from a previous run that did not exit cleanly, clear it and retry once
 		clearProfileLocks(dir)
 		ctx, err = engine.LaunchPersistentContext(dir, opts)
 	}

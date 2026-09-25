@@ -1,6 +1,6 @@
 # liout
 
-Send a custom first message to the right people on LinkedIn — from one terminal UI. It drives a real Chrome/Firefox through Playwright and uses your own logged-in session (no password, no API token).
+Send a custom first message to the right people on LinkedIn, from one terminal UI. It drives a real Chrome/Firefox through Playwright and uses your own logged in session (no password, no API token).
 
 <p align="center"><img src="assets/screenshot.png" alt="liout" width="820"></p>
 
@@ -13,25 +13,23 @@ go install github.com/codeyevsky/liout/cmd/liout@latest
 liout
 ```
 
-First run creates the config and drops you at sign-in; it downloads the Playwright browser once if needed.
+First run creates the config and drops you at sign in; it downloads the Playwright browser once if needed.
 
 ## Use
 
 Everything is in the menu (`↑↓`/`jk` move, number/letter jump, `enter` run, `q` quit):
 
-- **Session** — sign in via a real browser (login sticks between runs).
-- **Search** — find people by keyword, across everyone or just your connections; each search is saved.
-- **View list** — open a saved search; remove people you don't want.
-- **Messages** — your local message templates. Write plain text with placeholders:
+- **Session** · sign in via a real browser (login sticks between runs).
+- **Search** · find people by keyword, across everyone or just your connections; each search is saved.
+- **View list** · open a saved search; remove people you don't want.
+- **Messages** · your local message templates. Write plain text with placeholders:
   `[name]` `[company]` `[title]` `[headline]` `[location]` `[about]`,
   `[spin Hi|Hey|Hello]` (varies per person), `[company|our team]` (custom fallback).
   Anything in a `/* ... */` block is a note and isn't sent.
-- **Preview** — render the active message for everyone, paged.
-- **Send** — message everyone on a saved search in a visible browser. Skips anyone you've already talked to, never messages twice, small random delay, respects `blacklist.txt`. Falls back to a connection request with a note when direct messaging isn't available.
-- **Sent** — a 3×10 grid of who you've messaged; `d` removes an entry.
+- **Preview** · render the active message for everyone, paged.
+- **Send** · message everyone on a saved search in a visible browser. Skips anyone you've already talked to, never messages twice, small random delay, respects `blacklist.txt`. Falls back to a connection request with a note when direct messaging isn't available.
+- **Sent** · a 3×10 grid of who you've messaged; `d` removes an entry.
 
 ## Note
 
-LinkedIn restricts automated access and bulk messaging in its Terms of Service — the account risk is yours. Keep lists small and relevant.
-
-MIT · modeled on [githubFlex](https://github.com/codeyevsky/ghFlex).
+LinkedIn restricts automated access and bulk messaging in its Terms of Service. The account risk is yours. Keep lists small and relevant.

@@ -84,7 +84,7 @@ func (s *Session) messageViaCompose(text string, skipExisting bool) (done, alrea
 	}
 	s.Page.WaitForTimeout(500)
 
-	// already talked to them (even years ago, before liout)? skip — unless disabled.
+	// already talked to them (even years ago, before liout)? skip, unless disabled.
 	if skipExisting {
 		if v, e := s.Page.Evaluate(`() => document.querySelectorAll('.msg-s-event-listitem, .msg-s-message-list__event, li.msg-s-event-listitem').length`); e == nil {
 			if cnt, ok := v.(int); ok && cnt > 0 {
