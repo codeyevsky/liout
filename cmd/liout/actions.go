@@ -74,6 +74,9 @@ func (a *app) loginBrowser() error {
 	} {
 		cprintln(style.Tint(style.Dim, l))
 	}
+	if browser.NeedsDownload(br) {
+		cprintln(style.Tint(style.Dim, "first run only: liout downloads its own "+br+" (~100 MB) · one minute or so."))
+	}
 	fmt.Println()
 	cprintln(style.Tint(style.Blue, "launching ") + br + "…")
 	fmt.Println()

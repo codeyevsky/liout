@@ -7,8 +7,10 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"time"
 
@@ -18,20 +20,77 @@ import (
 const loginURL = "https://www.linkedin.com/login"
 const feedURL = "https://www.linkedin.com/feed/"
 
-// chromePaths: real Google Chrome first, then Chromium/Brave as fallback.
-var chromePaths = []string{
-	"/usr/bin/google-chrome-stable",
-	"/usr/bin/google-chrome",
-	"/opt/google/chrome/chrome",
-	"/usr/bin/chromium",
-	"/usr/bin/chromium-browser",
-	"/usr/bin/brave",
+// chromePaths lists where a Chrome-family binary usually lives, real Google
+// Chrome first, then Chromium/Brave · macOS keeps them inside .app bundles,
+// Linux in /usr/bin, so the list depends on the platform we run on.
+func chromePaths() []string {
+	home, _ := os.UserHomeDir()
+	switch runtime.GOOS {
+	case "darwin":
+		var out []string
+		for _, app := range []string{
+			"Google Chrome.app/Contents/MacOS/Google Chrome",
+			"Google Chrome Beta.app/Contents/MacOS/Google Chrome Beta",
+			"Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
+			"Chromium.app/Contents/MacOS/Chromium",
+			"Brave Browser.app/Contents/MacOS/Brave Browser",
+			"Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+		} {
+			out = append(out, filepath.Join("/Applications", app))
+			if home != "" {
+				out = append(out, filepath.Join(home, "Applications", app))
+			}
+		}
+		return out
+	case "windows":
+		var out []string
+		for _, base := range []string{
+			os.Getenv("ProgramFiles"),
+			os.Getenv("ProgramFiles(x86)"),
+			os.Getenv("LocalAppData"),
+		} {
+			if base == "" {
+				continue
+			}
+			out = append(out,
+				filepath.Join(base, `Google\Chrome\Application\chrome.exe`),
+				filepath.Join(base, `Google\Chrome Beta\Application\chrome.exe`),
+				filepath.Join(base, `Chromium\Application\chrome.exe`),
+				filepath.Join(base, `BraveSoftware\Brave-Browser\Application\brave.exe`),
+				filepath.Join(base, `Microsoft\Edge\Application\msedge.exe`),
+			)
+		}
+		return out
+	default:
+		return []string{
+			"/usr/bin/google-chrome-stable",
+			"/usr/bin/google-chrome",
+			"/opt/google/chrome/chrome",
+			"/usr/bin/chromium",
+			"/usr/bin/chromium-browser",
+			"/usr/bin/brave",
+			"/snap/bin/chromium",
+			"/var/lib/flatpak/exports/bin/com.google.Chrome",
+		}
+	}
+}
+
+// chromeNames are the command names to try on $PATH when none of the well
+// known install locations matched · covers homebrew, nix, custom prefixes.
+var chromeNames = []string{
+	"google-chrome-stable", "google-chrome", "chrome", "chromium", "chromium-browser",
+	"brave", "brave-browser", "microsoft-edge", "msedge",
 }
 
 // chromeExe returns the path to the preferred Chrome-family binary.
 func chromeExe() string {
-	for _, p := range chromePaths {
-		if _, err := os.Stat(p); err == nil {
+	for _, p := range chromePaths() {
+		if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
+			return p
+		}
+	}
+	for _, n := range chromeNames {
+		if p, err := exec.LookPath(n); err == nil {
 			return p
 		}
 	}
@@ -66,15 +125,41 @@ func (s *Session) Close() {
 	}
 }
 
-// profileDir keeps a persistent liout browser profile so a login sticks
-// between runs · the second time, sign-in is instant.
-func profileDir(browser string) string {
-	base := os.Getenv("XDG_DATA_HOME")
-	if base == "" {
-		home, _ := os.UserHomeDir()
-		base = filepath.Join(home, ".local", "share")
+// dataDir is where liout keeps per-user state, in the place each platform
+// expects it · Application Support on macOS, LocalAppData on Windows, XDG on Linux.
+func dataDir() string {
+	home, _ := os.UserHomeDir()
+	switch runtime.GOOS {
+	case "darwin":
+		return filepath.Join(home, "Library", "Application Support", "liout")
+	case "windows":
+		if la := os.Getenv("LocalAppData"); la != "" {
+			return filepath.Join(la, "liout")
+		}
+		return filepath.Join(home, "AppData", "Local", "liout")
+	default:
+		base := os.Getenv("XDG_DATA_HOME")
+		if base == "" {
+			base = filepath.Join(home, ".local", "share")
+		}
+		return filepath.Join(base, "liout")
 	}
-	p := filepath.Join(base, "liout", "profiles", browser)
+}
+
+// profileDir keeps a persistent liout browser profile so a login sticks
+// between runs · the second time, sign-in is instant. Runs that predate the
+// platform-native layout kept theirs under ~/.local/share on every OS, so an
+// existing one there still wins · nobody gets logged out by an update.
+func profileDir(browser string) string {
+	p := filepath.Join(dataDir(), "profiles", browser)
+	if _, err := os.Stat(p); err != nil && runtime.GOOS != "linux" {
+		if home, err := os.UserHomeDir(); err == nil {
+			legacy := filepath.Join(home, ".local", "share", "liout", "profiles", browser)
+			if fi, err := os.Stat(legacy); err == nil && fi.IsDir() {
+				return legacy
+			}
+		}
+	}
 	_ = os.MkdirAll(p, 0o755)
 	return p
 }
@@ -269,4 +354,56 @@ func Available() []string {
 	}
 	out = append(out, "firefox")
 	return out
+}
+
+// pwCacheDir is where playwright unpacks the browsers it downloads.
+func pwCacheDir() string {
+	if p := os.Getenv("PLAYWRIGHT_BROWSERS_PATH"); p != "" {
+		return p
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	switch runtime.GOOS {
+	case "darwin":
+		return filepath.Join(home, "Library", "Caches", "ms-playwright")
+	case "windows":
+		if la := os.Getenv("LocalAppData"); la != "" {
+			return filepath.Join(la, "ms-playwright")
+		}
+		return filepath.Join(home, "AppData", "Local", "ms-playwright")
+	default:
+		if c := os.Getenv("XDG_CACHE_HOME"); c != "" {
+			return filepath.Join(c, "ms-playwright")
+		}
+		return filepath.Join(home, ".cache", "ms-playwright")
+	}
+}
+
+// NeedsDownload reports whether launching this browser will first pull a
+// ~100 MB playwright build · lets the TUI warn before the progress bars start.
+// A system Chrome we drive by path never needs one.
+func NeedsDownload(browser string) bool {
+	if browser != "firefox" && chromeExe() != "" {
+		return false
+	}
+	prefix := "chromium"
+	if browser == "firefox" {
+		prefix = "firefox"
+	}
+	dir := pwCacheDir()
+	if dir == "" {
+		return true
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return true
+	}
+	for _, e := range entries {
+		if e.IsDir() && strings.HasPrefix(e.Name(), prefix+"-") {
+			return false
+		}
+	}
+	return true
 }
