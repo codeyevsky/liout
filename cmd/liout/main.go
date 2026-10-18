@@ -7,9 +7,10 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"math/rand"
 	"os"
+	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -67,8 +68,8 @@ func defaultConfig() Config {
 	c.Send.Mode = linkedin.ModeAuto
 	c.Send.TemplateFile = ""
 	c.Send.MessagesDir = "messages"
-	c.Send.DelayMin = 3
-	c.Send.DelayMax = 8
+	c.Send.DelayMin = 60
+	c.Send.DelayMax = 240
 	c.Blacklist = "blacklist.txt"
 	c.Store.Path = "data/sent.jsonl"
 	return c
@@ -198,6 +199,8 @@ func main() {
 		err = runTUI(ctx, "config.json")
 	case "init":
 		err = cmdInit(os.Args[2:])
+	case "update":
+		err = cmdUpdate(os.Args[2:])
 	case "whoami":
 		err = cmdWhoami(ctx, os.Args[2:])
 	case "search":
@@ -232,6 +235,7 @@ Run with no arguments to open the interactive menu (everything lives there).
 
 Commands:
   init                     create config and a starter message
+  update                   git pull the latest commit and rebuild
   whoami                   verify the saved session
   search   -q "..."        find people, apply regex rules, write a CSV
   search   -url "..."      paginate a search request copied from the browser
@@ -289,6 +293,57 @@ func dirOf(p string) string {
 func mustJSON(v any) string {
 	b, _ := json.MarshalIndent(v, "", "  ")
 	return string(b) + "\n"
+}
+
+// ---------- update ----------
+
+// cmdUpdate pulls the latest commit from git and rebuilds the local binary,
+// matching the git-clone + go-build install described in the README. It
+// resolves the repo directory from the running executable's real path (not
+// the current directory), since liout is commonly invoked via a symlink on
+// PATH from anywhere.
+func cmdUpdate(args []string) error {
+	fs := flag.NewFlagSet("update", flag.ExitOnError)
+	fs.Parse(args)
+
+	dir, err := repoDir()
+	if err != nil {
+		return fmt.Errorf("could not locate the liout checkout: %w", err)
+	}
+
+	fmt.Println("git pull…")
+	pull := exec.Command("git", "-C", dir, "pull")
+	pull.Stdout = os.Stdout
+	pull.Stderr = os.Stderr
+	if err := pull.Run(); err != nil {
+		return fmt.Errorf("git pull failed: %w", err)
+	}
+
+	fmt.Println("\nrebuilding…")
+	build := exec.Command("go", "build", "-o", filepath.Join(dir, "liout"), "./cmd/liout")
+	build.Dir = dir
+	build.Stdout = os.Stdout
+	build.Stderr = os.Stderr
+	if err := build.Run(); err != nil {
+		return fmt.Errorf("build failed: %w", err)
+	}
+
+	fmt.Println("\nupdated · restart liout to use the new build")
+	return nil
+}
+
+// repoDir resolves the directory of the running binary, following symlinks
+// (e.g. a PATH entry pointing back into the git checkout).
+func repoDir() (string, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	real, err := filepath.EvalSymlinks(exe)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Dir(real), nil
 }
 
 // ---------- whoami ----------
@@ -585,13 +640,8 @@ func cmdSend(ctx context.Context, args []string) error {
 
 	fmt.Printf("%d contacts · message: %s\n\n", len(people), cfg.Send.TemplateFile)
 
-	rnd := rand.New(rand.NewSource(time.Now().UnixNano()))
 	pause := func() time.Duration {
-		lo, hi := cfg.Send.DelayMin, cfg.Send.DelayMax
-		if hi <= lo {
-			return time.Duration(lo) * time.Second
-		}
-		return time.Duration(lo+rnd.Intn(hi-lo)) * time.Second
+		return randomDelay(cfg.Send.DelayMin, cfg.Send.DelayMax)
 	}
 
 	sent, skipped, failed, blocked := 0, 0, 0, 0

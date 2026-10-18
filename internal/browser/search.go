@@ -3,19 +3,36 @@ package browser
 import (
 	"context"
 	"fmt"
+	"math/rand"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/codeyevsky/liout/internal/model"
 
 	"github.com/mxschmitt/playwright-go"
 )
 
+// humanPause returns a jittered duration in [loMs, hiMs) ms, so repeated waits
+// (scrolling, paging) never land on the same round interval twice in a row.
+func humanPause(loMs, hiMs int) time.Duration {
+	lo, hi := int64(loMs)*int64(time.Millisecond), int64(hiMs)*int64(time.Millisecond)
+	if hi <= lo {
+		return time.Duration(lo)
+	}
+	return time.Duration(lo) + time.Duration(rand.Int63n(hi-lo))
+}
+
 // SearchPeople runs a People search inside the logged-in browser and scrapes the
 // results from the page · no Voyager API, so it can't 401 on a stale queryId.
-func (s *Session) SearchPeople(ctx context.Context, keywords, geoURN string, max int, connections bool, progress func(string)) ([]model.Person, error) {
+// startPage lets a caller resume from a specific page (e.g. when splitting one
+// search across several tabs); pass 0 or 1 to start from the beginning.
+func (s *Session) SearchPeople(ctx context.Context, keywords, geoURN string, max, startPage int, connections bool, progress func(string)) ([]model.Person, error) {
 	if max <= 0 {
 		max = 30
+	}
+	if startPage <= 0 {
+		startPage = 1
 	}
 	say := func(m string) {
 		if progress != nil {
@@ -25,19 +42,33 @@ func (s *Session) SearchPeople(ctx context.Context, keywords, geoURN string, max
 	seen := map[string]bool{}
 	var out []model.Person
 
-	for page := 1; len(out) < max && page <= 40; page++ {
+	for page := startPage; len(out) < max && page <= startPage+40; page++ {
 		select {
 		case <-ctx.Done():
 			return out, ctx.Err()
 		default:
 		}
 		u := searchURL(keywords, geoURN, page, connections)
-		say(fmt.Sprintf("page %d · loading…", page))
-		if _, err := s.Page.Goto(u, playwright.PageGotoOptions{WaitUntil: playwright.WaitUntilStateDomcontentloaded}); err != nil {
-			if len(out) > 0 {
-				return out, nil
+		wait := 30 * time.Second
+		const maxWait = 3 * time.Minute
+		for {
+			say(fmt.Sprintf("page %d · loading…", page))
+			resp, gerr := s.Page.Goto(u, playwright.PageGotoOptions{WaitUntil: playwright.WaitUntilStateDomcontentloaded})
+			if gerr == nil && (resp == nil || resp.Status() != 429) {
+				break
 			}
-			return nil, err
+			say(fmt.Sprintf("page %d · rate limited · waiting %s…", page, wait.Round(time.Second)))
+			select {
+			case <-ctx.Done():
+				return out, ctx.Err()
+			case <-time.After(wait):
+			}
+			if wait < maxWait {
+				wait += wait / 2
+				if wait > maxWait {
+					wait = maxWait
+				}
+			}
 		}
 		// bounced to a login / checkpoint wall?
 		if cur := s.Page.URL(); strings.Contains(cur, "/login") || strings.Contains(cur, "/checkpoint") || strings.Contains(cur, "/authwall") {
@@ -47,17 +78,18 @@ func (s *Session) SearchPeople(ctx context.Context, keywords, geoURN string, max
 		if _, err := s.Page.WaitForSelector(`main a[href*="/in/"]`, playwright.PageWaitForSelectorOptions{
 			Timeout: playwright.Float(20000),
 		}); err != nil {
-			if page == 1 {
+			if page == startPage {
 				return out, fmt.Errorf("no results appeared · try different keywords")
 			}
 			break
 		}
-		// let lazy rows fill in
+		// let lazy rows fill in, pausing a human-reading-the-page amount
+		// between each scroll instead of a fixed, repeatable cadence
 		for i := 0; i < 6; i++ {
 			s.Page.Mouse().Wheel(0, 1600)
-			s.Page.WaitForTimeout(700)
+			s.Page.WaitForTimeout(float64(humanPause(900, 2200).Milliseconds()))
 		}
-		s.Page.WaitForTimeout(800)
+		s.Page.WaitForTimeout(float64(humanPause(1000, 2500).Milliseconds()))
 		raw, err := s.evalPeople()
 		if err != nil {
 			if len(out) > 0 {
@@ -81,6 +113,17 @@ func (s *Session) SearchPeople(ctx context.Context, keywords, geoURN string, max
 		say(fmt.Sprintf("page %d · %d found (%d total)", page, fresh, len(out)))
 		if fresh == 0 {
 			break
+		}
+		if len(out) < max {
+			// a real person browsing results doesn't flip pages every few
+			// seconds · wait before requesting the next one
+			pause := humanPause(8000, 20000)
+			say(fmt.Sprintf("page %d done · waiting %s before the next page…", page, pause.Round(100*time.Millisecond)))
+			select {
+			case <-ctx.Done():
+				return out, ctx.Err()
+			case <-time.After(pause):
+			}
 		}
 	}
 	if len(out) > max {

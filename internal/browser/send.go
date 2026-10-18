@@ -2,6 +2,7 @@ package browser
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -15,21 +16,37 @@ type SendResult struct {
 	Note   string
 }
 
+// ErrRateLimited means the profile page itself never loaded — either LinkedIn
+// answered with HTTP 429, or the navigation errored outright, which under
+// heavy parallel-tab load is almost always LinkedIn throttling rather than a
+// real problem with that profile. Callers should back off and retry the same
+// person instead of treating this as a permanent failure.
+var ErrRateLimited = errors.New("rate limited by LinkedIn")
+
 // SendTo opens a person's profile and either messages them (if possible) or
 // sends a connection request with the text as a note · all through the real UI,
 // so it never touches the Voyager API. preferInvite forces the connect path.
 func (s *Session) SendTo(ctx context.Context, profileID, text string, preferInvite, skipExisting bool) (SendResult, error) {
 	url := "https://www.linkedin.com/in/" + profileID + "/"
-	if _, err := s.Page.Goto(url, playwright.PageGotoOptions{
+	resp, err := s.Page.Goto(url, playwright.PageGotoOptions{
 		WaitUntil: playwright.WaitUntilStateDomcontentloaded,
 		Timeout:   playwright.Float(30000),
-	}); err != nil {
-		return SendResult{}, fmt.Errorf("could not open profile")
+	})
+	if err != nil {
+		return SendResult{}, ErrRateLimited
+	}
+	if resp != nil && resp.Status() == 429 {
+		return SendResult{}, ErrRateLimited
 	}
 	if cur := s.Page.URL(); strings.Contains(cur, "/login") || strings.Contains(cur, "/authwall") {
 		return SendResult{}, fmt.Errorf("LinkedIn asked to log in; open Session and sign in again")
 	}
-	s.Page.WaitForSelector(`main`, playwright.PageWaitForSelectorOptions{Timeout: playwright.Float(15000)})
+	// a 200 response with a blank/stripped body (no error, no 429) is LinkedIn
+	// soft-throttling this account under heavy parallel load — treat it the
+	// same as a hard rate limit instead of plowing ahead on an empty page.
+	if _, err := s.Page.WaitForSelector(`main`, playwright.PageWaitForSelectorOptions{Timeout: playwright.Float(15000)}); err != nil {
+		return SendResult{}, ErrRateLimited
+	}
 	s.Page.WaitForTimeout(500)
 
 	if !preferInvite {
@@ -43,6 +60,20 @@ func (s *Session) SendTo(ctx context.Context, profileID, text string, preferInvi
 		if done {
 			return SendResult{Action: "message"}, nil
 		}
+		// messageViaCompose navigates to the messaging compose page; if it
+		// didn't find a send box there (e.g. InMail credits exhausted), go
+		// back to the profile before trying Connect — its button only exists
+		// there, not on the compose page we're currently sitting on.
+		if _, err := s.Page.Goto(url, playwright.PageGotoOptions{
+			WaitUntil: playwright.WaitUntilStateDomcontentloaded,
+			Timeout:   playwright.Float(30000),
+		}); err != nil {
+			return SendResult{}, ErrRateLimited
+		}
+		if _, err := s.Page.WaitForSelector(`main`, playwright.PageWaitForSelectorOptions{Timeout: playwright.Float(15000)}); err != nil {
+			return SendResult{}, ErrRateLimited
+		}
+		s.Page.WaitForTimeout(500)
 	}
 	// fall back to a connection request with a note (max 300 chars)
 	note := text

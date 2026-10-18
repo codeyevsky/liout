@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"math/rand"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 	"github.com/codeyevsky/liout/internal/browser"
 	"github.com/codeyevsky/liout/internal/linkedin"
 	"github.com/codeyevsky/liout/internal/match"
+	"github.com/codeyevsky/liout/internal/model"
 	"github.com/codeyevsky/liout/internal/store"
 	"github.com/codeyevsky/liout/internal/style"
 	"github.com/codeyevsky/liout/internal/tmpl"
@@ -274,10 +276,14 @@ func (a *app) actSearch() error {
 	saved := 0
 	for _, term := range terms {
 		spin := newSpinner("searching " + term + "…")
-		found, err := sess.SearchPeople(a.ctx, term, "", n, connections, spin.setLabel)
+		found, err := sess.SearchPeople(a.ctx, term, "", n, 0, connections, spin.setLabel)
 		spin.stop()
-		if err != nil && len(found) == 0 {
-			cprintln(style.Tint(style.Yellow, term+": "+err.Error()))
+		if len(found) == 0 {
+			if err != nil {
+				cprintln(style.Tint(style.Yellow, term+": "+err.Error()))
+			} else {
+				cprintln(style.Tint(style.Yellow, term+": no results"))
+			}
 			continue
 		}
 		for i := range found {
@@ -300,6 +306,47 @@ func (a *app) actSearch() error {
 		return fmt.Errorf("no people found · try different keywords")
 	}
 	return nil
+}
+
+// randomDelay picks a human-like pause between lo and hi seconds, jittered
+// down to the nanosecond so consecutive sends never land on a round, bot-like
+// interval · the same [lo,hi) range as before, just with sub-second noise.
+func randomDelay(lo, hi int) time.Duration {
+	loNS, hiNS := int64(lo)*int64(time.Second), int64(hi)*int64(time.Second)
+	if hiNS <= loNS {
+		return time.Duration(loNS)
+	}
+	return time.Duration(loNS) + time.Duration(rand.Int63n(hiNS-loNS))
+}
+
+// sendWithBackoff retries SendTo when LinkedIn rate-limits the tab (HTTP 429
+// or a failed profile load), waiting longer each time instead of counting it
+// as a real failure · a rate limit should pause and recover on its own, never
+// surface as an error to the user.
+func (a *app) sendWithBackoff(sess *browser.Session, profileID, msg string, preferInvite, skipExisting bool, notify func(string)) (browser.SendResult, error) {
+	wait := 30 * time.Second
+	const maxWait = 3 * time.Minute
+	for {
+		res, err := sess.SendTo(a.ctx, profileID, msg, preferInvite, skipExisting)
+		if err != browser.ErrRateLimited {
+			return res, err
+		}
+		if abortAction {
+			return res, err
+		}
+		notify(fmt.Sprintf("rate limited by LinkedIn · waiting %s…", wait.Round(time.Second)))
+		select {
+		case <-a.ctx.Done():
+			return browser.SendResult{}, a.ctx.Err()
+		case <-time.After(wait):
+		}
+		if wait < maxWait {
+			wait += wait / 2
+			if wait > maxWait {
+				wait = maxWait
+			}
+		}
+	}
 }
 
 func (a *app) actList() error {
@@ -533,37 +580,18 @@ func (a *app) actSend() error {
 	}
 	skipExisting := askYN("skip people you've already talked to?", true)
 	fmt.Println()
-	cprintln(style.Tint(style.Yellow, "Sends real messages from your account, in a visible browser."))
-	if !confirm("confirm") {
-		cprintln("cancelled.")
-		return nil
-	}
-	fmt.Println()
 
-	sess, err := browser.Open(browser.Opts{Browser: browserChoice(a), Headless: false})
-	if err != nil {
-		return err
+	// prefilter: blacklist / already-messaged / template errors never touch the
+	// browser, so resolve them up front · this also gives us the final list to
+	// split across tabs, instead of guessing chunk sizes from the raw CSV.
+	type candidate struct {
+		p   *model.Person
+		msg string
 	}
-	defer sess.Close()
-	a.refreshCookies(sess)
-
-	rnd := time.Now().UnixNano()
-	pauseSec := func() int {
-		lo, hi := a.cfg.Send.DelayMin, a.cfg.Send.DelayMax
-		if hi <= lo {
-			return lo
-		}
-		rnd = rnd*1103515245 + 12345
-		d := int((rnd >> 16) % int64(hi-lo))
-		if d < 0 {
-			d = -d
-		}
-		return lo + d
-	}
-
-	sent, skipped, failed, attempts := 0, 0, 0, 0
+	var candidates []candidate
+	skipped := 0
 	for i := range people {
-		if attempts >= limit {
+		if len(candidates) >= limit {
 			break
 		}
 		p := &people[i]
@@ -584,22 +612,51 @@ func (a *app) actSend() error {
 			cprintln(style.Tint(style.Dim, "· "+p.FullName+" · already messaged"))
 			continue
 		}
-		msg, err := r.Render(*p)
-		if err != nil {
+		msg, rerr := r.Render(*p)
+		if rerr != nil {
 			skipped++
-			cprintln(style.Tint(style.Dim, "· "+p.FullName+" · "+err.Error()))
+			cprintln(style.Tint(style.Dim, "· "+p.FullName+" · "+rerr.Error()))
 			continue
 		}
+		candidates = append(candidates, candidate{p, msg})
+	}
+	if len(candidates) == 0 {
+		return fmt.Errorf("nobody left to send to · %d skipped", skipped)
+	}
 
-		attempts++
+	cprintln(style.Tint(style.Yellow, "Sends real messages from your account, in a visible browser."))
+	if !confirm("confirm") {
+		cprintln("cancelled.")
+		return nil
+	}
+	fmt.Println()
+
+	if abortAction {
+		return nil
+	}
+	fmt.Println()
+
+	sess, err := browser.Open(browser.Opts{Browser: browserChoice(a), Headless: false})
+	if err != nil {
+		return err
+	}
+	defer sess.Close()
+	a.refreshCookies(sess)
+
+	sent, failed := 0, 0
+
+	for _, c := range candidates {
+		p := c.p
 		cprintln(style.Tint(style.Dim, "→ "+p.FullName+" …"))
-		res, err := sess.SendTo(a.ctx, p.ProfileID, msg, preferInvite, skipExisting)
+		res, serr := a.sendWithBackoff(sess, p.ProfileID, c.msg, preferInvite, skipExisting, func(m string) {
+			cprintln(style.Tint(style.Yellow, "⏳ "+m))
+		})
 		fmt.Print("\x1b[1A\r\x1b[2K") // erase the "…" line, replace with result
-		rec := store.Record{ProfileID: p.Key(), Name: p.FullName, Company: p.Company, Message: msg, Step: 1}
-		if err != nil {
+		rec := store.Record{ProfileID: p.Key(), Name: p.FullName, Company: p.Company, Message: c.msg, Step: 1}
+		if serr != nil {
 			failed++
-			rec.Status, rec.Error = store.StatusFailed, err.Error()
-			cprintln(style.Tint(style.Red, "✗ ") + cut(p.FullName+"  "+err.Error(), contentWidth()-3))
+			rec.Status, rec.Error = store.StatusFailed, serr.Error()
+			cprintln(style.Tint(style.Red, "✗ ") + cut(p.FullName+"  "+serr.Error(), contentWidth()-3))
 			st.Append(rec)
 		} else if res.Action == "already" {
 			skipped++
@@ -621,12 +678,15 @@ func (a *app) actSend() error {
 			cprintln("stopped.")
 			return nil
 		}
+		wait := randomDelay(a.cfg.Send.DelayMin, a.cfg.Send.DelayMax)
+		cprintln(style.Tint(style.Dim, fmt.Sprintf("  (waiting %s before the next one…)", wait.Round(10*time.Millisecond))))
 		select {
 		case <-a.ctx.Done():
 			cprintln("stopped.")
 			return nil
-		case <-time.After(time.Duration(pauseSec()) * time.Second):
+		case <-time.After(wait):
 		}
+		fmt.Print("\x1b[1A\r\x1b[2K") // erase the "waiting…" line
 	}
 	fmt.Println()
 	cprintln(style.Tint(style.Green, fmt.Sprintf("done · sent %d · skipped %d · failed %d", sent, skipped, failed)))
