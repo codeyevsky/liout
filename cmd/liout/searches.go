@@ -59,6 +59,25 @@ func addSearch(keyword string, people []model.Person, stamp time.Time, connectio
 	return s, saveSearches(list)
 }
 
+// allKnownPeople merges every saved search's CSV into one profile-id index,
+// so a person found by one keyword is still fully known (name, company,
+// headline…) when acting on them from a different context, e.g. a follow-up.
+func allKnownPeople() map[string]model.Person {
+	out := map[string]model.Person{}
+	for _, s := range loadSearches() {
+		people, err := store.ReadCSV(s.File)
+		if err != nil {
+			continue
+		}
+		for _, p := range people {
+			if k := p.Key(); k != "" {
+				out[k] = p
+			}
+		}
+	}
+	return out
+}
+
 func deleteSearch(id string) {
 	var kept []SavedSearch
 	for _, s := range loadSearches() {

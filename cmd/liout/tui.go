@@ -114,6 +114,7 @@ func menu() []menuItem {
 		{label: "Preview", desc: "see the active message rendered", key: "p", run: (*app).actPreview},
 
 		{group: "SEND", label: "Send", desc: "send the message to everyone on the list", key: "!", run: (*app).actSend},
+		{label: "Message again", desc: "new message to everyone already contacted, any list", key: "a", run: (*app).actFollowUp},
 		{label: "Sent", desc: "who you've already messaged", key: "h", run: (*app).actSent},
 	}
 }

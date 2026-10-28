@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -143,6 +144,20 @@ func (s *Store) FirstSentAt() (time.Time, bool) {
 		}
 	}
 	return first, !first.IsZero()
+}
+
+// Messaged returns the latest sent/invited record for everyone ever
+// successfully contacted, oldest first — the pool for a follow-up round,
+// regardless of which search list they originally came from.
+func (s *Store) Messaged() []Record {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]Record, 0, len(s.idx))
+	for _, r := range s.idx {
+		out = append(out, r)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].SentAt.Before(out[j].SentAt) })
+	return out
 }
 
 // Seen reports whether this person was already messaged successfully.

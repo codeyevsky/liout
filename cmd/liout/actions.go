@@ -693,6 +693,159 @@ func (a *app) actSend() error {
 	return nil
 }
 
+// actFollowUp sends a new message to everyone you've ever successfully
+// messaged, pooled across every search/list — "group" doesn't matter, only
+// the send ledger does.
+func (a *app) actFollowUp() error {
+	msgFiles := a.listMessages()
+	if len(msgFiles) == 0 {
+		return fmt.Errorf("no saved messages yet · create one in Messages")
+	}
+	sel := pick("which message to send", names(msgFiles), indexOfStr(msgFiles, a.cfg.Send.TemplateFile))
+	if abortAction {
+		return nil
+	}
+	tplPath := pathFor(msgFiles, sel)
+	fmt.Print(clr)
+
+	st, err := store.Open(a.cfg.Store.Path)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+
+	contacted := st.Messaged()
+	if len(contacted) == 0 {
+		return fmt.Errorf("nobody messaged yet")
+	}
+
+	tb, err := os.ReadFile(tplPath)
+	if err != nil {
+		return err
+	}
+	r, err := tmpl.New(tplPath, string(tb), a.cfg.Template)
+	if err != nil {
+		return err
+	}
+	ex, err := match.NewExtractor(a.cfg.Extract.HeadlinePattern, a.cfg.Extract.CompanyStrip)
+	if err != nil {
+		return err
+	}
+	bl, _ := match.LoadBlacklist(a.cfg.Blacklist)
+	known := allKnownPeople()
+
+	cprintln(fmt.Sprintf("%d people already messaged   message: %s", len(contacted), msgName(tplPath)))
+	fmt.Println()
+	limit := askCount("send to how many (blank = all)", len(contacted))
+	skipReplied := askYN("skip people who already replied?", true)
+	fmt.Println()
+
+	type candidate struct {
+		p   model.Person
+		msg string
+	}
+	var candidates []candidate
+	skipped := 0
+	for _, rec := range contacted {
+		if len(candidates) >= limit {
+			break
+		}
+		if skipReplied && st.Replied(rec.ProfileID) {
+			skipped++
+			continue
+		}
+		p, ok := known[rec.ProfileID]
+		if !ok {
+			p = model.Person{ProfileID: rec.ProfileID, URN: rec.URN, FullName: rec.Name, Company: rec.Company}
+		}
+		ex.Apply(&p)
+		if bl != nil {
+			if blocked, why := bl.Blocked(p); blocked {
+				skipped++
+				cprintln(style.Tint(style.Dim, "⛔ "+p.FullName+" · "+why))
+				continue
+			}
+		}
+		msg, rerr := r.Render(p)
+		if rerr != nil {
+			skipped++
+			cprintln(style.Tint(style.Dim, "· "+p.FullName+" · "+rerr.Error()))
+			continue
+		}
+		candidates = append(candidates, candidate{p, msg})
+	}
+	if len(candidates) == 0 {
+		return fmt.Errorf("nobody left to message · %d skipped", skipped)
+	}
+
+	cprintln(style.Tint(style.Yellow, "Sends real messages from your account, in a visible browser."))
+	if !confirm("confirm") {
+		cprintln("cancelled.")
+		return nil
+	}
+	fmt.Println()
+	if abortAction {
+		return nil
+	}
+	fmt.Println()
+
+	sess, err := browser.Open(browser.Opts{Browser: browserChoice(a), Headless: false})
+	if err != nil {
+		return err
+	}
+	defer sess.Close()
+	a.refreshCookies(sess)
+
+	sent, failed := 0, 0
+	for _, c := range candidates {
+		p := c.p
+		cprintln(style.Tint(style.Dim, "→ "+p.FullName+" …"))
+		// skipExisting=false: these are prior contacts · we want the message
+		// to land in the existing thread, not be treated as a duplicate.
+		res, serr := a.sendWithBackoff(sess, p.ProfileID, c.msg, false, false, func(m string) {
+			cprintln(style.Tint(style.Yellow, "⏳ "+m))
+		})
+		fmt.Print("\x1b[1A\r\x1b[2K")
+		rec := store.Record{ProfileID: p.Key(), URN: p.URN, Name: p.FullName, Company: p.Company, Message: c.msg, Step: st.Steps(p.Key()) + 1}
+		if serr != nil {
+			failed++
+			rec.Status, rec.Error = store.StatusFailed, serr.Error()
+			cprintln(style.Tint(style.Red, "✗ ") + cut(p.FullName+"  "+serr.Error(), contentWidth()-3))
+			st.Append(rec)
+		} else if res.Action == "already" {
+			skipped++
+			cprintln(style.Tint(style.Dim, "· "+p.FullName+"  already in a conversation"))
+			rec.Status = store.StatusSkipped
+			st.Append(rec)
+		} else {
+			sent++
+			rec.Status = store.StatusSent
+			if res.Action == "invite" {
+				rec.Status = store.StatusInvited
+			}
+			cprintln(style.Tint(style.Green, "✓ ") + cut(p.FullName+"  ("+res.Action+")", contentWidth()-3))
+			st.Append(rec)
+		}
+
+		if abortAction {
+			cprintln("stopped.")
+			return nil
+		}
+		wait := randomDelay(a.cfg.Send.DelayMin, a.cfg.Send.DelayMax)
+		cprintln(style.Tint(style.Dim, fmt.Sprintf("  (waiting %s before the next one…)", wait.Round(10*time.Millisecond))))
+		select {
+		case <-a.ctx.Done():
+			cprintln("stopped.")
+			return nil
+		case <-time.After(wait):
+		}
+		fmt.Print("\x1b[1A\r\x1b[2K")
+	}
+	fmt.Println()
+	cprintln(style.Tint(style.Green, fmt.Sprintf("done · sent %d · skipped %d · failed %d", sent, skipped, failed)))
+	return nil
+}
+
 // actSent shows everyone already messaged (sent history), newest first.
 func (a *app) actSent() error {
 	type rec struct {
