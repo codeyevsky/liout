@@ -188,6 +188,7 @@ func (a *app) runAction(it menuItem) error {
 		}
 	}()
 	a.ctx = ctx
+	abortAction = false // clear any Ctrl+C left over from a previous action
 	err := it.run(a)
 	a.ctx = base
 	signal.Stop(sig)
