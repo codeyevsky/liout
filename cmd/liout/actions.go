@@ -604,6 +604,10 @@ func (a *app) actSend() error {
 		}
 	}
 	skipExisting := askYN("skip people you've already talked to?", true)
+	skipRecent := false
+	if !skipExisting {
+		skipRecent = askYN("skip people messaged in the last 24h?", true)
+	}
 	fmt.Println()
 
 	// prefilter: blacklist / already-messaged / template errors never touch the
@@ -632,10 +636,17 @@ func (a *app) actSend() error {
 				continue
 			}
 		}
-		if st.Seen(p.Key()) {
+		if skipExisting && st.Seen(p.Key()) {
 			skipped++
 			cprintln(style.Tint(style.Dim, "· "+p.FullName+" · already messaged"))
 			continue
+		}
+		if skipRecent {
+			if rec, ok := st.LastSent(p.Key()); ok && time.Since(rec.SentAt) < 24*time.Hour {
+				skipped++
+				cprintln(style.Tint(style.Dim, "· "+p.FullName+" · messaged in the last 24h"))
+				continue
+			}
 		}
 		msg, rerr := r.Render(*p)
 		if rerr != nil {
