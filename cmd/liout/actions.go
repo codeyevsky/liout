@@ -392,7 +392,7 @@ func (a *app) actMessages() error {
 			cprintln(fmt.Sprintf("%s%d  %s", mark, i+1, msgName(f)))
 		}
 		fmt.Println()
-		choice := pick("action", []string{"choose active", "edit", "new", "preview", "delete", "back"}, 0)
+		choice := pick("action", []string{"choose active", "edit", "new", "rename", "preview", "delete", "back"}, 0)
 		if abortAction {
 			return nil
 		}
@@ -435,6 +435,31 @@ func (a *app) actMessages() error {
 				return err
 			}
 			cprintln(style.Tint(style.Green, "created and set active → "+msgName(path)))
+		case "rename":
+			if len(files) == 0 {
+				continue
+			}
+			sel := pick("rename which", names(files), indexOfStr(files, active))
+			if abortAction {
+				return nil
+			}
+			old := pathFor(files, sel)
+			name := ask("new name", msgName(old))
+			if name == "" || sanitizeName(name) == msgName(old) {
+				continue
+			}
+			newPath := filepath.Join(a.messagesDir(), sanitizeName(name)+".tmpl")
+			if fileExists(newPath) {
+				cprintln(style.Tint(style.Red, "✗ "+msgName(newPath)+" already exists"))
+				continue
+			}
+			if err := os.Rename(old, newPath); err != nil {
+				return err
+			}
+			if old == active {
+				a.setActive(newPath)
+			}
+			cprintln(style.Tint(style.Green, sel+" → "+msgName(newPath)))
 		case "preview":
 			if len(files) == 0 {
 				continue
