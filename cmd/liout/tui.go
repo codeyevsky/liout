@@ -175,6 +175,11 @@ func runTUI(ctx context.Context, cfgPath string) error {
 // only that action and never the whole menu.
 func (a *app) runAction(it menuItem) error {
 	base := a.ctx
+	if base.Err() != nil {
+		// The root context stays cancelled after a Ctrl+C in an earlier
+		// action; start fresh so this action isn't born dead.
+		base = context.Background()
+	}
 	ctx, cancel := context.WithCancel(base)
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt)

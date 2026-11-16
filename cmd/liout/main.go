@@ -169,19 +169,25 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// First Ctrl+C cancels the running work, the second one quits the process.
+	// Ctrl+C cancels the running work; a second press within 2s quits the
+	// process. Later, unrelated presses only cancel again — they must not
+	// kill the whole app once one action was ever interrupted.
 	// (signal.NotifyContext on its own swallows the second Ctrl+C too, which
 	// leaves the process impossible to kill from the keyboard.)
 	sigCh := make(chan os.Signal, 2)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 	go func() {
-		<-sigCh
-		cancel()
-		restoreTerminal()
-		fmt.Fprintf(os.Stderr, "\ninterrupted · press Ctrl+C again to quit\n")
-		<-sigCh
-		restoreTerminal()
-		os.Exit(130)
+		var last time.Time
+		for range sigCh {
+			if time.Since(last) < 2*time.Second {
+				restoreTerminal()
+				os.Exit(130)
+			}
+			last = time.Now()
+			cancel()
+			restoreTerminal()
+			fmt.Fprintf(os.Stderr, "\ninterrupted · press Ctrl+C again to quit\n")
+		}
 	}()
 
 	if len(os.Args) < 2 { // no arguments -> interactive menu
