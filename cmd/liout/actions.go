@@ -763,6 +763,7 @@ func (a *app) actFollowUp() error {
 	fmt.Println()
 	limit := askCount("send to how many (blank = all)", len(contacted))
 	skipReplied := askYN("skip people who already replied?", true)
+	skipRecent := askYN("skip people messaged in the last 24h?", true)
 	fmt.Println()
 
 	type candidate struct {
@@ -776,6 +777,10 @@ func (a *app) actFollowUp() error {
 			break
 		}
 		if skipReplied && st.Replied(rec.ProfileID) {
+			skipped++
+			continue
+		}
+		if skipRecent && time.Since(rec.SentAt) < 24*time.Hour {
 			skipped++
 			continue
 		}
